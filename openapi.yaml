@@ -1,0 +1,591 @@
+openapi: 3.1.0
+info:
+  title: PDF File Identifier API
+  description: "\n### \U0001F680 PDF Classification Engine with Automated Routing\n\
+    \nClassifies incoming PDF files into three architectural categories to optimize\
+    \ downstream extraction:\n\n* **`digital`**: Every content page contains a genuine,\
+    \ selectable vector text layer with standard embedded fonts.\n  * *Recommended\
+    \ Action*: Direct text & table extraction via PyMuPDF or pdfplumber. **No OCR\
+    \ required.**\n* **`semi_scanned`**: A hybrid document with a mixture of vector\
+    \ pages and raster scanned pages.\n  * *Recommended Action*: Extract digital pages\
+    \ natively; route only specific scanned page numbers to OCR.\n* **`fully_scanned`**:\
+    \ Every content page is an image scan, hidden OCR-sandwich layer, or raster print-stream\
+    \ font.\n  * *Recommended Action*: Route entire document to OCR / Vision LLM pipeline.\n\
+    \n---\n### \U0001F6E0\uFE0F Interactive Documentation & Specs\n* **Swagger UI**:\
+    \ [`/docs`](/docs)\n* **ReDoc UI**: [`/redoc`](/redoc)\n* **OpenAPI JSON**: [`/openapi.json`](/openapi.json)\n\
+    * **OpenAPI YAML**: [`/openapi.yaml`](/openapi.yaml)\n* **Health Check**: [`/health`](/health)\n"
+  version: 1.0.0
+paths:
+  /health:
+    get:
+      tags:
+      - System & Specs
+      summary: Health Check & System Diagnostics
+      description: Check the server status, PyMuPDF engine version, and available
+        API routes.
+      operationId: health_health_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /openapi.yaml:
+    get:
+      tags:
+      - System & Specs
+      summary: Download OpenAPI Spec (YAML format)
+      description: Returns the OpenAPI 3.x specification formatted as YAML for Swagger
+        Codegen, Postman, or SDK generation.
+      operationId: get_openapi_yaml_openapi_yaml_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            text/plain:
+              schema:
+                type: string
+  /api/v1/classify:
+    post:
+      tags:
+      - Classification
+      summary: Classify an Uploaded PDF File
+      description: 'Upload a PDF file using `multipart/form-data`.
+
+
+        The API inspects the PDF text layers, fonts, image bounding boxes, and hidden
+        OCR layers,
+
+        returning classification (`digital`, `semi_scanned`, or `fully_scanned`) and
+        detailed per-page metrics.'
+      operationId: classify_file_api_v1_classify_post
+      parameters:
+      - name: max_pages
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: integer
+            minimum: 1
+          - type: 'null'
+          description: Inspect only the first N pages (prefix sampling for fast routing)
+          title: Max Pages
+        description: Inspect only the first N pages (prefix sampling for fast routing)
+      - name: min_text_chars
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 0
+          description: Minimum character count threshold for real text
+          default: 25
+          title: Min Text Chars
+        description: Minimum character count threshold for real text
+      - name: scan_image_coverage
+        in: query
+        required: false
+        schema:
+          type: number
+          maximum: 1.0
+          minimum: 0.0
+          description: Fraction of image coverage (0.0 - 1.0) to classify page as
+            scanned
+          default: 0.7
+          title: Scan Image Coverage
+        description: Fraction of image coverage (0.0 - 1.0) to classify page as scanned
+      - name: treat_type3_as_scanned
+        in: query
+        required: false
+        schema:
+          type: boolean
+          description: Treat Type3 raster/bitmap fonts as scanned pages
+          default: true
+          title: Treat Type3 As Scanned
+        description: Treat Type3 raster/bitmap fonts as scanned pages
+      - name: save_to_upload
+        in: query
+        required: false
+        schema:
+          type: boolean
+          description: Archive uploaded file into upload_files directory for audit
+          default: true
+          title: Save To Upload
+        description: Archive uploaded file into upload_files directory for audit
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Body_classify_file_api_v1_classify_post'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClassifyResultModel'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/classify/path:
+    post:
+      tags:
+      - Classification
+      summary: Classify a PDF by Server File Path
+      description: 'Classify a PDF file already present on the server or a mounted
+        volume.
+
+
+        Ideal for microservices, background task workers, and queues (Celery, Kafka,
+        RabbitMQ)
+
+        where files are saved on shared storage and sending file payloads over HTTP
+        is unnecessary.'
+      operationId: classify_by_path_api_v1_classify_path_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClassifyPathRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClassifyResultModel'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/classify/batch:
+    post:
+      tags:
+      - Classification
+      summary: Classify Multiple PDF Files in Batch
+      description: Upload multiple PDF files concurrently and receive classification
+        reports for each file.
+      operationId: classify_batch_api_v1_classify_batch_post
+      parameters:
+      - name: max_pages
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: integer
+            minimum: 1
+          - type: 'null'
+          description: Prefix sampling limit per file
+          title: Max Pages
+        description: Prefix sampling limit per file
+      - name: treat_type3_as_scanned
+        in: query
+        required: false
+        schema:
+          type: boolean
+          description: Treat Type3 raster/bitmap fonts as scanned
+          default: true
+          title: Treat Type3 As Scanned
+        description: Treat Type3 raster/bitmap fonts as scanned
+      - name: save_to_upload
+        in: query
+        required: false
+        schema:
+          type: boolean
+          description: Archive files into upload_files directory
+          default: true
+          title: Save To Upload
+        description: Archive files into upload_files directory
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Body_classify_batch_api_v1_classify_batch_post'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchClassifyResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+components:
+  schemas:
+    BatchClassifyResponse:
+      properties:
+        total_files:
+          type: integer
+          title: Total Files
+          description: Number of files processed in batch
+          example: 2
+        successful:
+          type: integer
+          title: Successful
+          description: Count of successfully classified files
+          example: 2
+        failed:
+          type: integer
+          title: Failed
+          description: Count of failed files
+          example: 0
+        items:
+          items:
+            $ref: '#/components/schemas/BatchFileResult'
+          type: array
+          title: Items
+          description: Per-file results
+      type: object
+      required:
+      - total_files
+      - successful
+      - failed
+      title: BatchClassifyResponse
+    BatchFileResult:
+      properties:
+        file_name:
+          type: string
+          title: File Name
+          description: Name of the file processed
+          example: sample1.pdf
+        status:
+          type: string
+          title: Status
+          description: '''success'' or ''error'''
+          default: success
+          example: success
+        result:
+          anyOf:
+          - $ref: '#/components/schemas/ClassifyResultModel'
+          - type: 'null'
+          description: Classification result on success
+        error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Error
+          description: Error message if processing failed
+      type: object
+      required:
+      - file_name
+      title: BatchFileResult
+    Body_classify_batch_api_v1_classify_batch_post:
+      properties:
+        files:
+          items:
+            type: string
+            contentMediaType: application/octet-stream
+          type: array
+          title: Files
+          description: List of PDF files to classify
+      type: object
+      required:
+      - files
+      title: Body_classify_batch_api_v1_classify_batch_post
+    Body_classify_file_api_v1_classify_post:
+      properties:
+        file:
+          type: string
+          contentMediaType: application/octet-stream
+          title: File
+          description: PDF file to analyze (multipart/form-data)
+      type: object
+      required:
+      - file
+      title: Body_classify_file_api_v1_classify_post
+    ClassifyPathRequest:
+      properties:
+        path:
+          type: string
+          title: Path
+          description: Path to a PDF file on the server's filesystem
+          example: upload_files/Bank statement (1).pdf
+        max_pages:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Max Pages
+          description: Inspect only the first N pages (prefix sampling)
+          example: 10
+        min_text_chars:
+          type: integer
+          title: Min Text Chars
+          description: Minimum character count threshold to consider visible text
+            genuine
+          default: 25
+          example: 25
+        scan_image_coverage:
+          type: number
+          title: Scan Image Coverage
+          description: Fraction of page image coverage (0.0 to 1.0) above which a
+            page is treated as scanned
+          default: 0.7
+          example: 0.7
+        treat_type3_as_scanned:
+          type: boolean
+          title: Treat Type3 As Scanned
+          description: Treat Type3 raster/bitmap fonts as scanned pages
+          default: true
+          example: true
+        save_to_upload:
+          type: boolean
+          title: Save To Upload
+          description: Archive an audit copy into the upload_files directory
+          default: false
+          example: false
+      type: object
+      required:
+      - path
+      title: ClassifyPathRequest
+    ClassifyResultModel:
+      properties:
+        file_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: File Name
+          description: Original filename
+          example: contract.pdf
+        file_type:
+          $ref: '#/components/schemas/FileTypeEnum'
+          description: 'Document-level classification: digital | semi_scanned | fully_scanned'
+          example: digital
+        total_pages:
+          type: integer
+          title: Total Pages
+          description: Total pages in the PDF
+          example: 10
+        digital_pages:
+          type: integer
+          title: Digital Pages
+          description: Count of digital pages
+          example: 10
+        scanned_pages:
+          type: integer
+          title: Scanned Pages
+          description: Count of scanned pages
+          example: 0
+        blank_pages:
+          type: integer
+          title: Blank Pages
+          description: Count of blank pages
+          example: 0
+        scanned_ratio:
+          type: number
+          title: Scanned Ratio
+          description: Ratio of scanned to content pages (0.0 to 1.0)
+          example: 0.0
+        scanned_page_numbers:
+          items:
+            type: integer
+          type: array
+          title: Scanned Page Numbers
+          description: 1-based page numbers requiring OCR pipeline
+          example: []
+        digital_page_numbers:
+          items:
+            type: integer
+          type: array
+          title: Digital Page Numbers
+          description: 1-based page numbers suitable for native digital extraction
+          example:
+          - 1
+          - 2
+          - 3
+          - 4
+          - 5
+          - 6
+          - 7
+          - 8
+          - 9
+          - 10
+        pages_checked:
+          type: integer
+          title: Pages Checked
+          description: Total number of pages analyzed
+          example: 10
+        max_pages_checked:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Max Pages Checked
+          description: Sampling limit if max_pages was specified
+        saved_copy:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Saved Copy
+          description: Path to stored copy in upload_files directory if archived
+          example: C:/Users/.../upload_files/contract.pdf
+        pages:
+          items:
+            $ref: '#/components/schemas/PageInfoModel'
+          type: array
+          title: Pages
+          description: Detailed page-by-page inspection report
+      type: object
+      required:
+      - file_type
+      - total_pages
+      - digital_pages
+      - scanned_pages
+      - blank_pages
+      - scanned_ratio
+      - pages_checked
+      title: ClassifyResultModel
+    FileTypeEnum:
+      type: string
+      enum:
+      - digital
+      - semi_scanned
+      - fully_scanned
+      title: FileTypeEnum
+    HTTPValidationError:
+      properties:
+        detail:
+          items:
+            $ref: '#/components/schemas/ValidationError'
+          type: array
+          title: Detail
+      type: object
+      title: HTTPValidationError
+    HealthResponse:
+      properties:
+        status:
+          type: string
+          title: Status
+          default: healthy
+          example: healthy
+        engine:
+          type: string
+          title: Engine
+          default: PyMuPDF
+          example: PyMuPDF
+        engine_version:
+          type: string
+          title: Engine Version
+          example: 1.28.2
+        python_version:
+          type: string
+          title: Python Version
+          example: 3.11.0
+        version:
+          type: string
+          title: Version
+          default: 1.0.0
+          example: 1.0.0
+        endpoints:
+          additionalProperties:
+            type: string
+          type: object
+          title: Endpoints
+          description: Key endpoint paths
+      type: object
+      required:
+      - engine_version
+      - python_version
+      title: HealthResponse
+    PageInfoModel:
+      properties:
+        page_number:
+          type: integer
+          title: Page Number
+          description: 1-based page number in document
+          example: 1
+        page_type:
+          $ref: '#/components/schemas/PageTypeEnum'
+          description: Classification for this page
+          example: digital
+        text_chars:
+          type: integer
+          title: Text Chars
+          description: Number of visible text characters
+          example: 1240
+        image_coverage:
+          type: number
+          title: Image Coverage
+          description: Fraction of page area covered by images (0.0 to 1.0)
+          example: 0.08
+        has_invisible_text:
+          type: boolean
+          title: Has Invisible Text
+          description: Whether hidden OCR text layer is present
+          example: false
+        has_type3_fonts:
+          type: boolean
+          title: Has Type3 Fonts
+          description: Whether Type3 bitmap/raster fonts are detected
+          default: false
+          example: false
+        confidence:
+          type: number
+          title: Confidence
+          description: Classification confidence heuristic (0.0 to 1.0)
+          example: 0.95
+        reasons:
+          items:
+            type: string
+          type: array
+          title: Reasons
+          description: Diagnostic reasons explaining the decision
+      type: object
+      required:
+      - page_number
+      - page_type
+      - text_chars
+      - image_coverage
+      - has_invisible_text
+      - confidence
+      title: PageInfoModel
+    PageTypeEnum:
+      type: string
+      enum:
+      - digital
+      - scanned
+      - blank
+      title: PageTypeEnum
+    ValidationError:
+      properties:
+        loc:
+          items:
+            anyOf:
+            - type: string
+            - type: integer
+          type: array
+          title: Location
+        msg:
+          type: string
+          title: Message
+        type:
+          type: string
+          title: Error Type
+        input:
+          title: Input
+        ctx:
+          type: object
+          title: Context
+      type: object
+      required:
+      - loc
+      - msg
+      - type
+      title: ValidationError
+tags:
+- name: Classification
+  description: Endpoints to classify single or multiple PDF documents via upload or
+    server path.
+- name: System & Specs
+  description: System health diagnostics, environment metrics, and OpenAPI schema
+    exports.

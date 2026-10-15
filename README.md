@@ -157,13 +157,122 @@ When run via CLI or exported with `result.to_dict()`, the engine produces a stru
 
 ---
 
+## 🌐 Swagger / OpenAPI REST API
+
+A production-ready **FastAPI** server is provided in `app.py` with automatic interactive **Swagger UI**, **ReDoc**, and standard OpenAPI 3.1 schema exports.
+
+### 1. Launch the API Server
+
+```powershell
+# Activate your venv
+.\venv\Scripts\activate
+
+# Launch the server (runs on port 8000 by default)
+python app.py
+
+# Or run directly via Uvicorn with auto-reload:
+uvicorn app:app --reload --host 0.0.0.0 --port 8000
+```
+
+### 2. Interactive Documentation URLs
+
+Once started, open your browser:
+
+- **Interactive Swagger UI**: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) (Try endpoints directly in browser)
+- **ReDoc Documentation**: [http://127.0.0.1:8000/redoc](http://127.0.0.1:8000/redoc)
+- **OpenAPI Schema (JSON)**: [http://127.0.0.1:8000/openapi.json](http://127.0.0.1:8000/openapi.json)
+- **OpenAPI Schema (YAML)**: [http://127.0.0.1:8000/openapi.yaml](http://127.0.0.1:8000/openapi.yaml)
+- **Health Diagnostics**: [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
+
+> [!TIP]
+> Pre-generated [`openapi.json`](file:///c:/Users/c1755/File_Identifier/openapi.json) and [`openapi.yaml`](file:///c:/Users/c1755/File_Identifier/openapi.yaml) files are checked into the repository root so you can import them into **Postman**, **Insomnia**, or **SwaggerHub** without even running the server!
+
+---
+
+## 🔌 Connecting From Other Projects
+
+### Python (`requests` / `httpx`)
+
+```python
+import requests
+
+# 1. Classify via direct file upload
+with open("document.pdf", "rb") as f:
+    response = requests.post(
+        "http://127.0.0.1:8000/api/v1/classify",
+        files={"file": ("document.pdf", f, "application/pdf")},
+        params={"max_pages": 50, "save_to_upload": True}
+    )
+
+data = response.json()
+print("Classification:", data["file_type"]) # 'digital' | 'semi_scanned' | 'fully_scanned'
+print("Scanned pages:", data["scanned_page_numbers"])
+
+# 2. Or classify by server file path (no file transfer overhead)
+res_path = requests.post(
+    "http://127.0.0.1:8000/api/v1/classify/path",
+    json={"path": "upload_files/document.pdf", "max_pages": 20}
+)
+print(res_path.json()["file_type"])
+```
+
+### JavaScript / TypeScript (`fetch` / Node.js / React)
+
+```typescript
+// Multipart upload
+const formData = new FormData();
+formData.append("file", fileBlob, "document.pdf");
+
+const response = await fetch("http://127.0.0.1:8000/api/v1/classify?max_pages=50", {
+  method: "POST",
+  body: formData,
+});
+
+const result = await response.json();
+console.log(`Document type: ${result.file_type}`);
+console.log(`Needs OCR on pages: ${result.scanned_page_numbers.join(", ")}`);
+```
+
+### cURL
+
+```bash
+# Upload and classify
+curl -X POST "http://127.0.0.1:8000/api/v1/classify?max_pages=20" \
+     -H "Accept: application/json" \
+     -F "file=@upload_files/Bank statement (1).pdf;type=application/pdf"
+
+# Classify via server path
+curl -X POST "http://127.0.0.1:8000/api/v1/classify/path" \
+     -H "Content-Type: application/json" \
+     -d '{"path": "upload_files/Bank statement (1).pdf", "max_pages": 10}'
+```
+
+### Generating Client SDKs
+
+You can instantly generate typed API clients for TypeScript, Python, Java, Go, C#, etc., using `openapi.json`:
+
+```bash
+# Example: Generate TypeScript Axios client
+npx @openapitools/openapi-generator-cli generate \
+  -i openapi.json \
+  -g typescript-axios \
+  -o ./clients/typescript
+```
+
+---
+
 ## 📁 Repository Structure
 
 ```text
 File_Identifier/
+├── app.py                 # FastAPI server with Swagger UI & ReDoc
 ├── file_identifier.py     # Core classification engine & CLI interface
-├── requirement.txt        # Runtime dependencies (pymupdf)
-├── upload_files/          # Audit directory storing tested PDFs (gitignored)
+├── test_api.py            # API test suite (endpoint & Swagger validation)
+├── openapi.json           # Exported OpenAPI 3.1 specification (JSON)
+├── openapi.yaml           # Exported OpenAPI 3.1 specification (YAML)
+├── requirement.txt        # Runtime dependencies (pymupdf, fastapi, uvicorn...)
+├── upload_files/          # Audit directory storing tested PDFs
 ├── .gitignore             # Git ignore configuration
 └── README.md              # Project documentation
 ```
+
