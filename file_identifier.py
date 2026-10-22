@@ -66,6 +66,8 @@ class PageInfo:
     image_coverage: float  # 0..1, fraction of page covered by images (unioned)
     has_invisible_text: bool  # OCR text layer hidden under a scan
     has_type3_fonts: bool = False  # Type3 bitmap/raster fonts
+    drawings_count: int = 0  # vector path drawings count
+    uncovered_ink_ratio: float = 0.0  # fraction of visual ink with no matching digital text
     confidence: float = 1.0  # 0..1 heuristic confidence for this classification
     reasons: List[str] = field(default_factory=list)
 
@@ -129,6 +131,8 @@ class FileIdentifier:
         min_text_chars: int = 25,  # below this a page has "no real text"
         scan_image_coverage: float = 0.70,  # unioned image area / page area => scan
         blank_image_coverage: float = 0.05,
+        min_drawings_for_scan: int = 50,  # vector drawings threshold when visible text is absent
+        max_uncovered_ink_ratio: float = 0.80,  # dynamic ink threshold: >80% uncovered ink => scan
         max_pages_to_check: Optional[int] = None,  # cap for very large files
         treat_type3_as_scanned: bool = True,  # treat Type3 bitmap/raster fonts as scanned
         upload_dir: Optional[Union[str, Path]] = Path(__file__).resolve().parent / "upload_files",
@@ -139,12 +143,16 @@ class FileIdentifier:
             raise ValueError("scan_image_coverage must be between 0.0 and 1.0")
         if not (0.0 <= blank_image_coverage <= 1.0):
             raise ValueError("blank_image_coverage must be between 0.0 and 1.0")
+        if not (0.0 <= max_uncovered_ink_ratio <= 1.0):
+            raise ValueError("max_uncovered_ink_ratio must be between 0.0 and 1.0")
         if max_pages_to_check is not None and max_pages_to_check < 1:
             raise ValueError("max_pages_to_check must be >= 1 if provided")
 
         self.min_text_chars = min_text_chars
         self.scan_image_coverage = scan_image_coverage
         self.blank_image_coverage = blank_image_coverage
+        self.min_drawings_for_scan = min_drawings_for_scan
+        self.max_uncovered_ink_ratio = max_uncovered_ink_ratio
         self.max_pages_to_check = max_pages_to_check
         self.treat_type3_as_scanned = treat_type3_as_scanned
         self.upload_dir = Path(upload_dir) if upload_dir is not None else None
@@ -213,6 +221,84 @@ class FileIdentifier:
         return self._build_result(pages, total, limit, saved_copy=saved_copy_path)
 
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _calculate_uncovered_ink_ratio(page: "fitz.Page") -> Tuple[float, int, int]:
+        """
+        Dynamically calculates the fraction of visible ink pixels that are NOT covered
+        by any digital text bounding box.
+
+        Returns:
+            (uncovered_ratio, total_ink_pixels, uncovered_ink_pixels)
+        """
+        try:
+            try:
+                import numpy as np
+                has_np = True
+            except ImportError:
+                has_np = False
+
+            pix = page.get_pixmap(dpi=72, colorspace=fitz.csGRAY)
+            w, h = pix.width, pix.height
+
+            if has_np:
+                arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(h, w)
+                ink_mask = arr < 235
+                total_ink = int(np.sum(ink_mask))
+                if total_ink < 400:
+                    return 0.0, total_ink, 0
+
+                text_blocks = page.get_text("blocks")
+                scale_x = w / page.rect.width if page.rect.width > 0 else 1.0
+                scale_y = h / page.rect.height if page.rect.height > 0 else 1.0
+                text_covered_mask = np.zeros_like(ink_mask, dtype=bool)
+
+                for b in text_blocks:
+                    if len(b) > 4 and b[4] and b[4].strip():
+                        bx0 = max(0, int(b[0] * scale_x))
+                        by0 = max(0, int(b[1] * scale_y))
+                        bx1 = min(w, int(b[2] * scale_x) + 1)
+                        by1 = min(h, int(b[3] * scale_y) + 1)
+                        text_covered_mask[by0:by1, bx0:bx1] = True
+
+                uncovered_ink = int(np.sum(ink_mask & (~text_covered_mask)))
+                ratio = uncovered_ink / total_ink if total_ink > 0 else 0.0
+                return float(ratio), total_ink, uncovered_ink
+
+            # Pure Python fallback
+            samples = bytearray(pix.samples)
+            total_ink = 0
+            ink_indices = []
+            for idx, val in enumerate(samples):
+                if val < 235:
+                    total_ink += 1
+                    ink_indices.append(idx)
+
+            if total_ink < 400:
+                return 0.0, total_ink, 0
+
+            text_blocks = page.get_text("blocks")
+            scale_x = w / page.rect.width if page.rect.width > 0 else 1.0
+            scale_y = h / page.rect.height if page.rect.height > 0 else 1.0
+
+            covered_pixels = bytearray(w * h)
+            for b in text_blocks:
+                if len(b) > 4 and b[4] and b[4].strip():
+                    bx0 = max(0, int(b[0] * scale_x))
+                    by0 = max(0, int(b[1] * scale_y))
+                    bx1 = min(w, int(b[2] * scale_x) + 1)
+                    by1 = min(h, int(b[3] * scale_y) + 1)
+                    for y in range(by0, by1):
+                        row_start = y * w
+                        for x in range(bx0, bx1):
+                            covered_pixels[row_start + x] = 1
+
+            uncovered_ink = sum(1 for idx in ink_indices if not covered_pixels[idx])
+            ratio = uncovered_ink / total_ink if total_ink > 0 else 0.0
+            return float(ratio), total_ink, uncovered_ink
+        except Exception:
+            return 0.0, 0, 0
+
+    # ------------------------------------------------------------------ #
     def _analyse_page(self, page: "fitz.Page", number: int) -> PageInfo:
         page_rect = page.rect
         page_area = max(page_rect.width * page_rect.height, 1.0)
@@ -222,12 +308,19 @@ class FileIdentifier:
         has_fonts, has_only_type3, type3_ratio = self._font_analysis(page)
         has_invisible = invisible >= self.min_text_chars
 
+        try:
+            drawings_count = len(page.get_drawings())
+        except Exception:
+            drawings_count = 0
+
+        uncovered_ratio, total_ink, uncovered_ink = self._calculate_uncovered_ink_ratio(page)
+
         ptype = PageType.BLANK
         confidence = 0.5
         reasons: List[str] = []
 
         reasons.append(
-            f"visible={visible}, invisible={invisible}, img_cov={coverage:.3f}, fonts={has_fonts}, type3_ratio={type3_ratio:.2f}"
+            f"visible={visible}, invisible={invisible}, img_cov={coverage:.3f}, fonts={has_fonts}, ink_tot={total_ink}, unc_ink={uncovered_ratio:.2f}"
         )
 
         is_type3_scanned = (
@@ -240,44 +333,36 @@ class FileIdentifier:
             ptype = PageType.SCANNED
             confidence = 0.90
             reasons.append("predominantly Type3 bitmap fonts (raster print-stream) -> scanned")
-        elif visible >= self.min_text_chars and has_fonts:
-            if coverage >= self.scan_image_coverage and visible < self.min_text_chars * 4:
-                ptype = PageType.SCANNED
-                confidence = 0.65
-                reasons.append("fonts+text but very high image_coverage -> scanned")
-            else:
-                ptype = PageType.DIGITAL
-                confidence = 0.95
-                reasons.append("has_fonts + sufficient visible_text -> digital")
-        elif visible >= self.min_text_chars and not has_fonts:
-            if coverage >= self.scan_image_coverage and visible < self.min_text_chars * 4:
-                ptype = PageType.SCANNED
-                confidence = 0.7
-                reasons.append("high image_coverage + sparse visible_text -> scanned")
-            else:
-                ptype = PageType.DIGITAL
-                confidence = 0.85
-                reasons.append("sufficient visible_text -> digital")
+        elif total_ink < 400 and visible == 0 and not has_invisible:
+            ptype = PageType.BLANK
+            confidence = 0.98
+            reasons.append("virtually no visual ink and no text -> blank")
         elif coverage >= self.scan_image_coverage or has_invisible:
             ptype = PageType.SCANNED
             confidence = 0.9 if has_invisible else 0.85
             if has_invisible:
                 reasons.append("image-heavy or invisible_ocr_layer -> scanned")
             else:
-                reasons.append("high image_coverage + low visible_text -> scanned")
-        elif coverage < self.blank_image_coverage and visible == 0 and not has_invisible:
-            ptype = PageType.BLANK
-            confidence = 0.98
-            reasons.append("no text and negligible image_coverage -> blank")
+                reasons.append("high raster image coverage -> scanned")
+        elif total_ink >= 400 and uncovered_ratio >= self.max_uncovered_ink_ratio:
+            # DYNAMIC INK COVERAGE: Over 80% of visible ink has no matching digital text layer
+            ptype = PageType.SCANNED
+            confidence = 0.95
+            reasons.append(
+                f"dynamic ink analysis: {uncovered_ratio*100:.1f}% of visible ink has no digital text -> scanned"
+            )
+        elif visible >= self.min_text_chars and has_fonts:
+            ptype = PageType.DIGITAL
+            confidence = 0.95
+            reasons.append(f"has_fonts + text covers visual content (uncovered ink: {uncovered_ratio*100:.1f}%) -> digital")
+        elif visible >= self.min_text_chars:
+            ptype = PageType.DIGITAL
+            confidence = 0.85
+            reasons.append(f"sufficient visible text (uncovered ink: {uncovered_ratio*100:.1f}%) -> digital")
         else:
-            if coverage >= 0.30:
-                ptype = PageType.SCANNED
-                confidence = 0.6
-                reasons.append("moderate image_coverage + low text -> scanned")
-            else:
-                ptype = PageType.BLANK
-                confidence = 0.8
-                reasons.append("low coverage and minimal text -> blank")
+            ptype = PageType.BLANK
+            confidence = 0.80
+            reasons.append("low coverage and minimal text -> blank")
 
         if confidence < 0.0:
             confidence = 0.0
@@ -291,6 +376,8 @@ class FileIdentifier:
             image_coverage=round(coverage, 3),
             has_invisible_text=has_invisible,
             has_type3_fonts=(has_only_type3 or type3_ratio > 0.0),
+            drawings_count=drawings_count,
+            uncovered_ink_ratio=round(uncovered_ratio, 3),
             confidence=round(confidence, 3),
             reasons=reasons,
         )
